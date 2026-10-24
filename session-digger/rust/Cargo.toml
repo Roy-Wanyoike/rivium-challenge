@@ -1,0 +1,45 @@
+[package]
+name = "session-digger"
+version = "0.1.0"
+edition = "2021"
+description = "droidcon Kenya link digger built on the Rivium app runtime"
+
+[dependencies]
+rivium = { version = "0.2.0", features = ["full"] }
+apalis = { version = "1.0.0", features = ["retry", "limit"] }
+apalis-core = { version = "1.0.0", features = ["task-context"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "io-std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+futures = "0.3"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rivium-host = { version = "0.2.0", features = ["process"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+rivium-jni = "0.2.0"
+rivium-host = { version = "0.2.0", features = ["embedded"] }
+
+[lib]
+name = "session_digger"
+path = "src/lib.rs"
+
+[[bin]]
+name = "digd"
+path = "src/bin/digd.rs"
+
+[dev-dependencies]
+tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+# rivium-jni rejects panic=abort; keep unwind explicitly for Android FFI safety
+panic = "unwind"
