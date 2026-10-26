@@ -26,6 +26,13 @@ data class JobRow(
     val updatedAt: Long = 0L,
 )
 
+/** One speaker harvested from the droidcon speakers page. */
+data class Speaker(
+    val name: String,
+    val role: String? = null,
+    val url: String = "",
+)
+
 /**
  * Rust → Java callback surface and in-app state mirror.
  *
@@ -40,6 +47,10 @@ object JobEvents {
 
     private val _jobs = MutableStateFlow<List<JobRow>>(emptyList())
     val jobs: StateFlow<List<JobRow>> = _jobs
+
+    /** Archived speakers (droidcon.co.ke/speakers), harvest order kept. */
+    private val _speakers = MutableStateFlow<List<Speaker>>(emptyList())
+    val speakers: StateFlow<List<Speaker>> = _speakers
 
     /** Newest-first read model for Compose and the QS tile. */
     val rows: List<JobRow> get() = _jobs.value
@@ -70,6 +81,58 @@ object JobEvents {
         } catch (t: Throwable) {
             // Never propagate into FFI.
             Log.w(TAG, "bad event payload", t)
+        }
+    }
+
+    /**
+     * Called by Rust after the speakers page is digested. Payload:
+     * `{"url": …, "speakers": [{"name": …, "role": …}, …]}`. Must not throw.
+     */
+    @JvmStatic
+    fun onSpeakers(payloadJson: String) {
+        try {
+            val obj = JSONObject(payloadJson)
+            val url = obj.optString("url")
+            val arr = obj.optJSONArray("speakers") ?: return
+            val list = ArrayList<Speaker>(arr.length())
+            for (i in 0 until arr.length()) {
+                val entry = arr.optJSONObject(i) ?: continue
+                val name = entry.optString("name").trim()
+                if (name.isEmpty()) continue
+                list.add(
+                    Speaker(
+                        name = name,
+                        role = entry.optString("role").takeIf { it.isNotEmpty() },
+                        url = url,
+                    )
+                )
+            }
+            upsertSpeakers(list)
+        } catch (t: Throwable) {
+            // Never propagate into FFI.
+            Log.w(TAG, "bad speakers payload", t)
+        }
+    }
+
+    /** Merge speakers (live events or the SQLite mirror), keyed by name. */
+    fun upsertSpeakers(incoming: List<Speaker>) {
+        if (incoming.isEmpty()) return
+        synchronized(this) {
+            val merged = _speakers.value.filterNot { known ->
+                incoming.any { it.name == known.name }
+            }
+            _speakers.value = merged + incoming
+        }
+    }
+
+    /** Seed the job list from the SQLite mirror; additive, never clobbers. */
+    fun hydrateJobs(rows: List<JobRow>) {
+        if (rows.isEmpty()) return
+        synchronized(this) {
+            val known = _jobs.value.map { it.id }.toHashSet()
+            val additions = rows.filter { it.id !in known }
+            if (additions.isEmpty()) return
+            _jobs.value = (additions + _jobs.value).sortedByDescending { it.updatedAt }
         }
     }
 
