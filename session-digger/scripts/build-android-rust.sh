@@ -10,8 +10,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUST_DIR="$SCRIPT_DIR/rust"
-OUT_DIR="$SCRIPT_DIR/android/app/src/main/jniLibs/arm64-v8a"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"          # session-digger/
+RUST_DIR="$PROJECT_DIR/rust"
+OUT_DIR="$PROJECT_DIR/android/app/src/main/jniLibs/arm64-v8a"
 TARGET="aarch64-linux-android"
 LIB="libsession_digger.so"
 
@@ -47,11 +48,21 @@ else
     note "No NDK found (set ANDROID_NDK_HOME) — cargo-ndk will try its own lookup."
 fi
 
-note "cargo-ndk build: $TARGET (release)"
-( cd "$RUST_DIR" && cargo ndk -t "$TARGET" -o "$OUT_DIR" build --release ) || {
+note "cargo-ndk build: $TARGET (release, cdylib only)"
+# --lib: only the cdylib (JNI host) — the digd desktop binary is not an
+# Android target and depends on rivium-host's `process` feature.
+( cd "$RUST_DIR" && cargo ndk -t "$TARGET" -o "$OUT_DIR" build --release --lib ) || {
     note "cargo-ndk build FAILED — check the log above."
     exit 1
 }
+
+# cargo-ndk's own copy step is unreliable when the lib is both rlib and
+# cdylib, so place the artifact explicitly.
+BUILT_SO="$RUST_DIR/target/$TARGET/release/$LIB"
+if [[ -f "$BUILT_SO" ]]; then
+    mkdir -p "$OUT_DIR"
+    cp -f "$BUILT_SO" "$OUT_DIR/$LIB"
+fi
 
 if [[ -f "$OUT_DIR/$LIB" ]]; then
     note "OK: $OUT_DIR/$LIB"

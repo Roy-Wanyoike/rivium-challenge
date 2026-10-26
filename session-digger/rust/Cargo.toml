@@ -30,6 +30,9 @@ rivium-host = { version = "0.2.0", features = ["embedded"] }
 [lib]
 name = "session_digger"
 path = "src/lib.rs"
+# rlib: linked by digd and the laptop e2e tests on desktop.
+# cdylib: packaged as libsession_digger.so for the Android JNI host.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "digd"

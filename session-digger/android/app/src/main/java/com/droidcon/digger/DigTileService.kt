@@ -28,7 +28,7 @@ class DigTileService : TileService() {
     }
 
     private fun render() {
-        val tile = tile ?: return
+        val tile = qsTile ?: return
         val hostRunning = RustHost.statusNow() == RustHost.STATUS_RUNNING
         tile.state = if (hostRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         val pending = JobEvents.pendingCount()

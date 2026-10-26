@@ -188,7 +188,7 @@ private fun JobCard(row: JobRow) {
                     "sha256 ${row.sha256}",
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
-                    overflow = TextOverflow.MiddleEllipsis,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (!row.error.isNullOrBlank()) {
