@@ -1,5 +1,4 @@
 pub mod ledger;
-pub mod queue;
 pub mod jobs;
 pub mod services;
 pub mod app;

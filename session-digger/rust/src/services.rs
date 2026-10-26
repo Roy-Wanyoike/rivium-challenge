@@ -6,27 +6,31 @@
 //!   strings into the process-wide enqueue channel (Android pushes the same
 //!   channel from JNI via `NativeBridge.nativeEnqueue`).
 //! - `enqueue-pump` owns that channel's receiving end, admits URLs into the
-//!   SQLite ledger, replays un-finished rows at boot, and forwards
-//!   ledger-backed tasks into the worker channel.
-//! - `digest-worker` runs the apalis worker over `ChannelBackend` until the
-//!   rivium stop token fires, then drains.
+//!   digest index (dedupe per URL), and pushes `DigestJob`s into the
+//!   **apalis-sqlite** durable queue (`<root>/data/queue.db`).
+//! - `digest-worker` runs the apalis worker over `SqliteStorage` until the
+//!   rivium stop token fires. Pushed tasks survive restarts; in-flight tasks
+//!   orphaned by a crash are re-enqueued by the backend after a heartbeat
+//!   timeout, so the worker owns no replay logic of its own.
 //!
-//! The SQLite ledger is the source of truth; channels are only transport.
+//! The digest index (`<root>/data/jobs.db`) mirrors statuses for the UI; the
+//! apalis queue table is the durable source of truth for owed work.
 
 use crate::jobs::{self, DigestJob};
 use crate::ledger::{Admit, JobRow, Ledger};
-use crate::queue::ChannelBackend;
 use apalis::layers::retry::RetryPolicy;
 use apalis::layers::WorkerBuilderExt;
+use apalis_core::backend::ext::poll_strategy::{PollWith, StreamStrategy};
+use apalis_core::backend::TaskSink;
 use apalis_core::error::WorkerError;
-use apalis_core::task::Task;
 use apalis_core::task::attempt::Attempt;
 use apalis_core::task::builder::TaskBuilder;
 use apalis_core::task::context::TaskContext;
 use apalis_core::task::task_fn::task_fn;
-use apalis_core::task::task_id::TaskId;
 use apalis_core::worker::builder::WorkerBuilder;
 use apalis_core::worker::ext::parallelize::ParallelizeExt;
+use apalis_sqlite::callback::HookCallbackListener;
+use apalis_sqlite::SqliteStorage;
 use rivium::{Context, Error, Kind, Service, service};
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,22 +41,27 @@ pub const MAX_ATTEMPTS: u32 = 3;
 const MAX_RETRIES: usize = (MAX_ATTEMPTS - 1) as usize;
 
 /// Quiescence poll interval and cap for the desktop EOF stop. The cap only
-/// guards against a wedged queue; un-finished rows replay on the next boot
-/// either way, so a timeout never loses acknowledged work.
+/// guards against a wedged queue; pushed tasks are durable in apalis-sqlite
+/// and re-run on the next boot, so a timeout never loses acknowledged work.
 const QUIESCE_POLL: Duration = Duration::from_millis(100);
 const QUIESCE_POLLS: u32 = 3_000; // 5 minutes
 
-/// Callback invoked on every ledger transition; desktop prints, Android
+/// Callback invoked on every index transition; desktop prints, Android
 /// forwards to `JobEvents.onJobUpdate` over JNI.
 pub type EventSink = Arc<dyn Fn(&JobRow) + Send + Sync>;
+
+/// The worker-side backend: apalis-sqlite woken instantly by SQLite update
+/// hooks (no polling latency between a tile tap and the fetch).
+pub type WorkerBackend =
+    PollWith<SqliteStorage<DigestJob>, StreamStrategy<HookCallbackListener>>;
 
 /// Everything the services and the task handler need.
 pub struct Shared {
     pub ledger: Arc<Ledger>,
     /// Raw URLs coming from stdin (desktop) or JNI (Android).
     pub enqueue_tx: mpsc::UnboundedSender<String>,
-    /// Ledger-backed tasks flowing into the apalis worker.
-    pub worker_tx: crate::queue::ChannelHandle<DigestJob>,
+    /// Durable apalis-sqlite queue; Clone, so JNI callers and the pump share it.
+    pub queue: SqliteStorage<DigestJob>,
     pub events: EventSink,
     pub concurrency: usize,
     pub request_timeout: Duration,
@@ -65,48 +74,43 @@ pub fn shared_state() -> Option<Arc<Shared>> {
     crate::app::state()
 }
 
-fn build_task(row: &JobRow) -> Task<DigestJob> {
-    TaskBuilder::new(DigestJob {
+/// Persist a digest job into the apalis-sqlite queue. `max_attempts` bounds
+/// the storage-level retry net (crash/orphan path); the in-process retry
+/// layer handles the immediate retries.
+async fn push_digest(
+    shared: &Shared,
+    row: &JobRow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let task = TaskBuilder::new(DigestJob {
         id: row.id.clone(),
         url: row.url.clone(),
     })
-    .task_id(TaskId::from_string(row.id.clone()))
-    .idempotency_key(row.id.clone())
-    .build()
-}
-
-/// Replay every un-finished ledger row into the worker channel.
-/// `running` rows from a crashed prior run are reset to `queued` first —
-/// this is the SIGKILL-recovery path.
-fn replay_pending(shared: &Shared) -> rivium::Result<()> {
-    shared
-        .ledger
-        .reset_running()
-        .map_err(|e| Error::internal(format!("ledger reset: {e}")))?;
-    let pending = shared
-        .ledger
-        .pending()
-        .map_err(|e| Error::internal(format!("ledger read: {e}")))?;
-    for row in &pending {
-        shared
-            .worker_tx
-            .send(build_task(row))
-            .map_err(|_| Error::internal("worker channel closed during replay"))?;
-        (shared.events)(row);
-    }
-    if !pending.is_empty() {
-        tracing::info!(count = pending.len(), "replayed pending jobs");
-    }
+    .max_attempts(MAX_ATTEMPTS as usize)
+    .build();
+    // SqliteStorage is Clone (Arc'd pool inside); push through a clone so the
+    // shared handle stays shared. NOTE: no idempotency_key — the index's
+    // admit() dedupe already prevents duplicate pushes, and `!URL` requeue
+    // MUST be able to insert a fresh task for a URL that already has a
+    // terminal row in the Jobs table.
+    shared.queue.clone().push_task(task).await?;
     Ok(())
 }
 
-/// Admission loop: raw URL strings in, ledger-backed tasks out.
+/// Admission loop: raw URL strings in, durable apalis-sqlite tasks out.
 pub fn enqueue_pump(
     shared: Arc<Shared>,
     mut enqueue_rx: mpsc::UnboundedReceiver<String>,
 ) -> Box<dyn Service> {
     service("enqueue-pump", Kind::Frontline, move |ctx: Context| async move {
-        replay_pending(&shared)?;
+        // Pushed tasks are durable; on boot the backend itself re-enqueues
+        // anything a crashed process left in flight. Just log what is owed.
+        match shared.ledger.pending() {
+            Ok(pending) if !pending.is_empty() => {
+                tracing::info!(count = pending.len(), "resuming pending jobs");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "index read failed at boot"),
+        }
         ctx.ready();
         loop {
             tokio::select! {
@@ -114,14 +118,14 @@ pub fn enqueue_pump(
                 _ = ctx.stopped() => {
                     // Graceful stop: drain whatever is still buffered (e.g. a
                     // last-millisecond JNI enqueue on Android) so it is
-                    // persisted now and replayed on the next boot.
+                    // persisted now and picked up on the next boot.
                     while let Ok(line) = enqueue_rx.try_recv() {
-                        admit_line(&shared, &line);
+                        admit_line(&shared, &line).await;
                     }
                     return Ok(());
                 }
                 maybe_url = enqueue_rx.recv() => match maybe_url {
-                    Some(line) => admit_line(&shared, &line),
+                    Some(line) => admit_line(&shared, &line).await,
                     None => {
                         // Every enqueue source is gone: nothing new can arrive.
                         ctx.control().stop(rivium::StopReason::Requested);
@@ -147,12 +151,12 @@ async fn wait_for_quiescence(shared: &Shared) {
         tokio::time::sleep(QUIESCE_POLL).await;
     }
     tracing::warn!(
-        "queue did not drain before stop; un-finished rows will replay on next boot"
+        "queue did not drain before stop; pushed tasks are durable and will re-run on next boot"
     );
 }
 
 /// `URL` enqueues; `!URL` re-queues a previously failed job; `#...` comments.
-fn admit_line(shared: &Shared, line: &str) {
+async fn admit_line(shared: &Shared, line: &str) {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return;
@@ -170,8 +174,8 @@ fn admit_line(shared: &Shared, line: &str) {
         match shared.ledger.requeue_failed(url) {
             Ok(Some(row)) => {
                 (shared.events)(&row);
-                if let Err(e) = shared.worker_tx.send(build_task(&row)) {
-                    tracing::error!(url, error = %e, "worker channel refused task");
+                if let Err(e) = push_digest(shared, &row).await {
+                    tracing::error!(url, error = %e, "durable queue refused task");
                 }
             }
             Ok(None) => tracing::info!(url, "nothing to requeue"),
@@ -186,12 +190,12 @@ fn admit_line(shared: &Shared, line: &str) {
             match shared.ledger.get(&id) {
                 Ok(Some(row)) => {
                     (shared.events)(&row);
-                    if let Err(e) = shared.worker_tx.send(build_task(&row)) {
-                        tracing::error!(url, error = %e, "worker channel refused task");
+                    if let Err(e) = push_digest(shared, &row).await {
+                        tracing::error!(url, error = %e, "durable queue refused task");
                     }
                 }
                 Ok(None) => tracing::error!(url, "admitted row vanished"),
-                Err(e) => tracing::error!(url, error = %e, "ledger read failed"),
+                Err(e) => tracing::error!(url, error = %e, "index read failed"),
             }
         }
         Ok(other) => {
@@ -202,20 +206,25 @@ fn admit_line(shared: &Shared, line: &str) {
             }
             tracing::info!(url, state = ?other, "job already tracked; skipping");
         }
-        Err(e) => tracing::error!(url, error = %e, "ledger admit failed"),
+        Err(e) => tracing::error!(url, error = %e, "index admit failed"),
     }
 }
 
 /// The apalis worker as a supervised rivium service.
 pub fn digest_worker(
     shared: Arc<Shared>,
-    backend: ChannelBackend<DigestJob>,
+    backend: WorkerBackend,
 ) -> Box<dyn Service> {
     service("digest-worker", Kind::Frontline, move |ctx: Context| async move {
         ctx.ready();
         let concurrency = shared.concurrency.clamp(1, 16);
         let policy = RetryPolicy::retries(MAX_RETRIES);
-        let worker = WorkerBuilder::new("dig-worker")
+        // Unique-per-process worker name: apalis-sqlite keys worker rows by
+        // name, so a restarted process must not adopt the crashed run's row —
+        // the stale row ages out instead and the live worker's heartbeat
+        // sweep re-enqueues the tasks it left locked.
+        let worker_name = format!("dig-worker-{}", std::process::id());
+        let worker = WorkerBuilder::new(worker_name.as_str())
             .backend(backend)
             // parallelize must wrap the raw task_fn first: its future has to be
             // 'static before the concurrency/retry towers see it.

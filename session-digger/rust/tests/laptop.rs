@@ -138,7 +138,7 @@ fn e2e_digest_flow() {
 
     let rows = wait_for(
         &root,
-        &format!("SELECT url, sha256, attempts FROM jobs WHERE url = '{URL_HOME}' AND state = 'done'"),
+        &format!("SELECT url, sha256, attempts FROM jobs WHERE url = '{URL_HOME}' AND state = 'Done'"),
         "done row",
     );
     let (_, sha256, attempts) = &rows[0];
@@ -173,7 +173,7 @@ fn e2e_sigkill_replay() {
             &root,
             &format!("SELECT url, state, attempts FROM jobs WHERE url = '{URL_HOME}'"),
         );
-        if rows.iter().any(|(_, state, _)| state == "running") {
+        if rows.iter().any(|(_, state, _)| state == "Running") {
             break;
         }
         std::thread::sleep(POLL);
@@ -182,7 +182,7 @@ fn e2e_sigkill_replay() {
 
     let mid = query(&root, "SELECT url, state, attempts FROM jobs");
     assert!(
-        mid.iter().any(|(_, s, _)| s == "running" || s == "queued"),
+        mid.iter().any(|(_, s, _)| s == "Running" || s == "Queued"),
         "expected an unfinished row after SIGKILL, got {mid:?}"
     );
 
@@ -190,7 +190,7 @@ fn e2e_sigkill_replay() {
     let _digd = Daemon::spawn(&root);
     let rows = wait_for(
         &root,
-        &format!("SELECT url, sha256, attempts FROM jobs WHERE url = '{URL_HOME}' AND state = 'done'"),
+        &format!("SELECT url, sha256, attempts FROM jobs WHERE url = '{URL_HOME}' AND state = 'Done'"),
         "replayed done row",
     );
     assert!(is_sha256(&rows[0].1));
@@ -210,7 +210,7 @@ fn e2e_failure_then_requeue() {
 
     let rows = wait_for(
         &root,
-        "SELECT url, state, attempts FROM jobs WHERE state = 'failed'",
+        "SELECT url, state, attempts FROM jobs WHERE state = 'Failed'",
         "failed row",
     );
     assert_eq!(rows[0].2, 3, "must exhaust 1 initial + 2 retries");
@@ -221,7 +221,7 @@ fn e2e_failure_then_requeue() {
         assert!(deadline > Instant::now(), "requeue never ran again");
         let rows = query(
             &root,
-            "SELECT url, state, attempts FROM jobs WHERE state = 'running' OR attempts > 3",
+            "SELECT url, state, attempts FROM jobs WHERE state = 'Running' OR attempts > 3",
         );
         if !rows.is_empty() {
             break;

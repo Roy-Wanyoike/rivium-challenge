@@ -8,6 +8,7 @@ description = "droidcon Kenya link digger built on the Rivium app runtime"
 rivium = { version = "0.2.0", features = ["full"] }
 apalis = { version = "1.0.0", features = ["retry", "limit"] }
 apalis-core = { version = "1.0.0", features = ["task-context"] }
+apalis-sqlite = "1.0.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "io-std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 sha2 = "0.10"

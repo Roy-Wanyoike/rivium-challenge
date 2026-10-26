@@ -1,0 +1,5 @@
+# sqlx compile-time checked queries (used by apalis-sqlite) must resolve from
+# the crate's shipped `.sqlx` cache, never from a live `DATABASE_URL` — this
+# keeps `cargo build` hermetic on any laptop or CI machine.
+[env]
+SQLX_OFFLINE = "true"

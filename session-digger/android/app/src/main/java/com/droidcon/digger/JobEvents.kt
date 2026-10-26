@@ -44,7 +44,7 @@ object JobEvents {
     /** Newest-first read model for Compose and the QS tile. */
     val rows: List<JobRow> get() = _jobs.value
 
-    fun pendingCount(): Int = _jobs.value.count { it.state == "queued" || it.state == "running" }
+    fun pendingCount(): Int = _jobs.value.count { it.state == "Queued" || it.state == "Running" }
 
     /** Called by Rust. Must not throw — panics unwind into FFI wrappers. */
     @JvmStatic
@@ -66,7 +66,7 @@ object JobEvents {
                 val rest = _jobs.value.filterNot { it.id == row.id }
                 _jobs.value = (listOf(row) + rest).sortedByDescending { it.updatedAt }
             }
-            if (row.state == "done" || row.state == "failed") notify(row)
+            if (row.state == "Done" || row.state == "Failed") notify(row)
         } catch (t: Throwable) {
             // Never propagate into FFI.
             Log.w(TAG, "bad event payload", t)
@@ -96,7 +96,7 @@ object JobEvents {
             PendingIntent.FLAG_IMMUTABLE,
         )
         val text = when (row.state) {
-            "done" -> row.title?.let { "$it — ${row.sha256?.take(12)}…" } ?: row.sha256.orEmpty()
+            "Done" -> row.title?.let { "$it — ${row.sha256?.take(12)}…" } ?: row.sha256.orEmpty()
             else -> row.error ?: "digest failed"
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)

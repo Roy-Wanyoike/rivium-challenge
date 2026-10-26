@@ -1,41 +1,34 @@
-//! SQLite job ledger: the single source of truth for digest work.
+//! SQLite digest index: one row per digested URL, mirroring apalis task
+//! statuses as they change.
 //!
-//! The in-process task channel (see [`crate::queue`]) is only a transport;
-//! every durable state transition goes through this module so a SIGKILL at
-//! any point replays cleanly on the next boot.
+//! The **durable queue** is `apalis-sqlite` (`<root>/data/queue.db`): pushed
+//! tasks survive restarts, and orphaned in-flight tasks are re-enqueued by
+//! the backend itself after a heartbeat timeout. This module is the
+//! lightweight **results index** the UI and the QS tile read: title, SHA-256,
+//! error, attempt count — using apalis-core's own [`Status`] vocabulary so
+//! both views of a job agree.
 
+use apalis_core::task::status::Status;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest as _, Sha256};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Mutex;
 
-/// Lifecycle of a digest job, persisted verbatim in the `state` column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobState {
-    Queued,
-    Running,
-    Done,
-    Failed,
+/// Parse a persisted status, tolerating legacy lowercase spellings.
+fn parse_status(raw: &str) -> Status {
+    Status::from_str(raw).unwrap_or_else(|_| match raw.to_ascii_lowercase().as_str() {
+        "running" => Status::Running,
+        "done" => Status::Done,
+        "failed" => Status::Failed,
+        "killed" => Status::Killed,
+        _ => Status::Queued,
+    })
 }
 
-impl JobState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            JobState::Queued => "queued",
-            JobState::Running => "running",
-            JobState::Done => "done",
-            JobState::Failed => "failed",
-        }
-    }
-
-    fn from_str(raw: &str) -> Self {
-        match raw {
-            "running" => JobState::Running,
-            "done" => JobState::Done,
-            "failed" => JobState::Failed,
-            _ => JobState::Queued,
-        }
-    }
+/// Whether the job still owes work (used for quiescence and tile counts).
+fn is_pending(status: &Status) -> bool {
+    matches!(status, Status::Pending | Status::Queued | Status::Running)
 }
 
 /// One ledger row as observed by callers and event sinks.
@@ -133,17 +126,17 @@ impl Ledger {
             .query_row("SELECT state FROM jobs WHERE id = ?1", [&id], |r| r.get(0))
             .optional()?;
         if let Some(state) = existing {
-            return Ok(match JobState::from_str(&state) {
-                JobState::Queued | JobState::Running => Admit::AlreadyPending,
-                JobState::Done => Admit::AlreadyDone,
-                JobState::Failed => Admit::AlreadyFailed,
+            return Ok(match parse_status(&state) {
+                s if is_pending(&s) => Admit::AlreadyPending,
+                Status::Done => Admit::AlreadyDone,
+                _ => Admit::AlreadyFailed,
             });
         }
         let ts = now();
         conn.execute(
             "INSERT INTO jobs (id, url, state, created_at, updated_at) \
-             VALUES (?1, ?2, 'queued', ?3, ?3)",
-            rusqlite::params![id, url, ts],
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![id, url, Status::Queued.to_string(), ts],
         )?;
         Ok(Admit::Admitted)
     }
@@ -153,9 +146,14 @@ impl Ledger {
         let id = job_id_for(url);
         let conn = self.0.lock().expect("ledger poisoned");
         let changed = conn.execute(
-            "UPDATE jobs SET state = 'queued', error = NULL, updated_at = ?2 \
-             WHERE id = ?1 AND state = 'failed'",
-            rusqlite::params![id, now()],
+            "UPDATE jobs SET state = ?2, error = NULL, updated_at = ?3 \
+             WHERE id = ?1 AND state = ?4",
+            rusqlite::params![
+                id,
+                Status::Queued.to_string(),
+                now(),
+                Status::Failed.to_string()
+            ],
         )?;
         drop(conn);
         if changed == 0 {
@@ -167,7 +165,7 @@ impl Ledger {
     fn update_state(
         &self,
         id: &str,
-        state: JobState,
+        state: Status,
         attempts: u32,
         title: Option<&str>,
         sha256: Option<&str>,
@@ -179,7 +177,7 @@ impl Ledger {
              error = ?6, updated_at = ?7 WHERE id = ?1",
             rusqlite::params![
                 id,
-                state.as_str(),
+                state.to_string(),
                 attempts as i64,
                 title,
                 sha256,
@@ -193,9 +191,9 @@ impl Ledger {
         })
     }
 
-    /// Transition into `running` for the given 1-based attempt number.
+    /// Transition into `Running` for the given 1-based attempt number.
     pub fn mark_running(&self, id: &str, attempt: u32) -> rusqlite::Result<JobRow> {
-        self.update_state(id, JobState::Running, attempt, None, None, None)
+        self.update_state(id, Status::Running, attempt, None, None, None)
     }
 
     /// Record a successful digest.
@@ -206,11 +204,11 @@ impl Ledger {
         title: Option<&str>,
         sha256: &str,
     ) -> rusqlite::Result<JobRow> {
-        self.update_state(id, JobState::Done, attempts, title, Some(sha256), None)
+        self.update_state(id, Status::Done, attempts, title, Some(sha256), None)
     }
 
-    /// Record a failure; `final` flips the row to `failed`, otherwise the job
-    /// returns to `queued` so the retry layer's next attempt can pick it up.
+    /// Record a failure; `final` parks the row in `Failed`, otherwise the job
+    /// returns to `Queued` so the retry layer's next attempt can pick it up.
     pub fn mark_error(
         &self,
         id: &str,
@@ -224,9 +222,9 @@ impl Ledger {
             note = note.chars().take(300).collect();
         }
         let state = if final_attempt {
-            JobState::Failed
+            Status::Failed
         } else {
-            JobState::Queued
+            Status::Queued
         };
         self.update_state(id, state, attempts, None, None, Some(&note))
     }
@@ -242,17 +240,22 @@ impl Ledger {
         .optional()
     }
 
-    /// All rows still owed work: `queued` plus any `running` survivor of a crash.
+    /// All rows still owed work: `Queued` plus any `Running` survivor of a
+    /// crash (the apalis-sqlite backend re-enqueues the latter itself).
     pub fn pending(&self) -> rusqlite::Result<Vec<JobRow>> {
         let conn = self.0.lock().expect("ledger poisoned");
         let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM jobs WHERE state IN ('queued', 'running') \
-             ORDER BY created_at, id",
+            "SELECT {} FROM jobs ORDER BY created_at, id",
             Self::COLUMNS
         ))?;
         let rows = stmt
             .query_map([], Self::row_from)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .filter_map(|row| {
+                let row = row.ok()?;
+                let status = parse_status(&row.state);
+                is_pending(&status).then_some(row)
+            })
+            .collect::<Vec<_>>();
         Ok(rows)
     }
 
@@ -267,15 +270,6 @@ impl Ledger {
             .query_map([limit as i64], Self::row_from)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
-    }
-
-    /// Reset crash-orphaned `running` rows back to `queued`; returns count.
-    pub fn reset_running(&self) -> rusqlite::Result<usize> {
-        let conn = self.0.lock().expect("ledger poisoned");
-        conn.execute(
-            "UPDATE jobs SET state = 'queued', updated_at = ?1 WHERE state = 'running'",
-            [now()],
-        )
     }
 }
 
@@ -299,9 +293,9 @@ mod tests {
         );
         let id = job_id_for("https://droidcon.co.ke");
         let row = ledger.mark_running(&id, 1).unwrap();
-        assert_eq!(row.state, "running");
+        assert_eq!(row.state, "Running");
         let row = ledger.mark_done(&id, 1, Some("droidcon Kenya"), "abc").unwrap();
-        assert_eq!(row.state, "done");
+        assert_eq!(row.state, "Done");
         assert_eq!(
             ledger.admit("https://droidcon.co.ke").unwrap(),
             Admit::AlreadyDone
@@ -309,16 +303,33 @@ mod tests {
     }
 
     #[test]
-    fn crash_orphans_replay() {
+    fn crash_orphans_stay_pending_for_the_backend() {
         let (_dir, ledger) = temp_ledger();
         ledger.admit("https://droidcon.co.ke/speakers").unwrap();
         let id = job_id_for("https://droidcon.co.ke/speakers");
         ledger.mark_running(&id, 1).unwrap();
-        // Simulated SIGKILL: nothing marks done; next boot resets and replays.
-        assert_eq!(ledger.reset_running().unwrap(), 1);
+        // Simulated SIGKILL: the index row stays `Running`; the apalis-sqlite
+        // backend owns re-enqueueing the orphaned task after its heartbeat
+        // timeout. Quiescence still sees it as pending either way.
         let pending = ledger.pending().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].state, "queued");
+        assert_eq!(pending[0].state, "Running");
+    }
+
+    #[test]
+    fn legacy_lowercase_rows_still_parse() {
+        let (_dir, ledger) = temp_ledger();
+        ledger.admit("https://example.com/legacy").unwrap();
+        let id = job_id_for("https://example.com/legacy");
+        {
+            let conn = ledger.0.lock().unwrap();
+            conn.execute(
+                "UPDATE jobs SET state = 'done' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        }
+        assert_eq!(ledger.admit("https://example.com/legacy").unwrap(), Admit::AlreadyDone);
     }
 
     #[test]
@@ -329,7 +340,7 @@ mod tests {
         let id = job_id_for(url);
         let junk = "🦀".repeat(400);
         let row = ledger.mark_error(&id, 3, &junk, true).unwrap();
-        assert_eq!(row.state, "failed");
+        assert_eq!(row.state, "Failed");
         assert!(row.error.as_ref().unwrap().chars().count() <= 300);
     }
 }

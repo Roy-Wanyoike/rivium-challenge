@@ -2,11 +2,14 @@
 //!
 //! One process, three supervised services (two on Android):
 //! `digest-worker` → `enqueue-pump` → `link-ingest` (desktop only).
-//! All durable state lives in the SQLite ledger under `<root>/data`.
+//! Durable queue state lives in apalis-sqlite under `<root>/data/queue.db`;
+//! the digest index (results, titles, hashes) in `<root>/data/jobs.db`.
 
+use crate::jobs::DigestJob;
 use crate::ledger::{JobRow, Ledger};
-use crate::queue::ChannelBackend;
-use crate::services::{self, EventSink, Shared};
+use crate::services::{self, EventSink, Shared, WorkerBackend};
+use apalis_core::backend::ext::BackendExt;
+use apalis_sqlite::{Config as QueueConfig, SqliteStorage};
 use rivium::{Error, Result, Service};
 use rivium_host::Context as HostContext;
 use serde::{Deserialize, Serialize};
@@ -42,10 +45,57 @@ impl Default for Config {
 
 static STATE: OnceLock<Arc<Shared>> = OnceLock::new();
 
+/// Background runtime for sqlx pool construction and its maintenance task:
+/// `App::services` runs on the host thread *outside* any tokio context, but
+/// `SqlitePool` spawns its reaper at creation time and needs one. Kept alive
+/// for the process lifetime so the pool's maintenance task keeps ticking.
+static QUEUE_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
 /// Shared handle for the task handler and JNI bridge; installed by
 /// `services` before any service future runs.
 pub fn state() -> Option<Arc<Shared>> {
     STATE.get().cloned()
+}
+
+/// Open the durable apalis-sqlite queue at `<root>/data/queue.db`, run its
+/// migrations, and return the push-side storage plus the hook listener that
+/// wakes the worker the instant the database changes.
+fn open_queue(
+    root: &std::path::Path,
+) -> Result<(SqliteStorage<DigestJob>, WorkerBackend)> {
+    std::fs::create_dir_all(root)
+        .map_err(|e| Error::internal(format!("queue dir: {e}")))?;
+    let url = format!("sqlite://{}/queue.db?mode=rwc", root.display());
+    let runtime = QUEUE_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("queue runtime")
+    });
+    let build = async {
+        let (pool, listener) = SqliteStorage::connect_with_callback(&url)
+            .map_err(|e| Error::internal(format!("queue connect: {e}")))?;
+        SqliteStorage::<()>::setup(&pool)
+            .await
+            .map_err(|e| Error::internal(format!("queue migrate: {e}")))?;
+        Ok::<_, Error>((pool, listener))
+    };
+    // block_on is only reached from a sync (non-async) host thread; rivium
+    // calls `App::services` before its own runtime is entered.
+    let (pool, listener) = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(build)?,
+        Err(_) => runtime.block_on(build)?,
+    };
+    // Heartbeat 5s (orphan timeout 10s): tasks left locked by a dead worker
+    // are re-enqueued by the live worker's heartbeat sweep within seconds of
+    // the crash; the register-time sweep handles any that outlived it.
+    let config = QueueConfig::default()
+        .queue("digest")
+        .heartbeat_interval(Duration::from_secs(5));
+    let storage = SqliteStorage::<DigestJob>::new(&pool).with_config(config);
+    let worker_backend = storage.clone().poll_with_stream(listener);
+    Ok((storage, worker_backend))
 }
 
 /// Application marker type used by both the desktop `digd` binary and the
@@ -74,17 +124,17 @@ impl rivium_host::App for DiggerApp {
         let root = ctx.paths().root().join("data");
         let ledger =
             Ledger::open(&root).map_err(|e| Error::internal(format!("ledger open: {e}")))?;
+        let (queue, worker_backend) = open_queue(&root)?;
 
-        // Transport channels: raw URL strings in, ledger-backed tasks out.
+        // Transport channel: raw URL strings from stdin (desktop) or JNI.
         let (enqueue_tx, enqueue_rx) = mpsc::unbounded_channel();
-        let (backend, worker_tx) = ChannelBackend::channel();
 
         let events: EventSink = Arc::new(emit_row);
 
         let shared = Arc::new(Shared {
             ledger: Arc::new(ledger),
             enqueue_tx,
-            worker_tx,
+            queue,
             events,
             concurrency: config.concurrency,
             request_timeout: Duration::from_secs(config.request_timeout_secs),
@@ -95,7 +145,7 @@ impl rivium_host::App for DiggerApp {
             .map_err(|_| Error::internal("digger state already initialized in this process"))?;
 
         let mut roots: Vec<Box<dyn Service>> =
-            vec![services::digest_worker(shared.clone(), backend)];
+            vec![services::digest_worker(shared.clone(), worker_backend)];
         #[cfg(not(target_os = "android"))]
         {
             let (lines_tx, lines_rx) = mpsc::unbounded_channel();

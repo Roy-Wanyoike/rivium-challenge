@@ -14,23 +14,27 @@ stdin ───┘            │
                       v
              enqueue channel (tokio mpsc)
                       │
-             ┌── enqueue-pump ─────────────┐
-             │  SQLite ledger = truth      │   replay queued/running
-             └──────────┬──────────────────┘   rows on boot (SIGKILL-safe)
-                       v
-             ChannelBackend ──> apalis worker
+             ┌── enqueue-pump ────────────┐
+             │  admit URL (dedupe) into   │
+             │  the digest index          │
+             └──────────┬─────────────────┘
+                        v
+             apalis-sqlite  SqliteStorage  <─ durable queue (queue.db)
+             (WAL, migrations, orphaned-task re-enqueue after a crash)
+                        │
+             apalis worker
              (parallelize -> concurrency(4) -> retry x2)
-                       │
+                        │
              reqwest GET -> <title> + SHA-256
-                       │
-             ledger.mark_done -> JobEvents.onJobUpdate (JNI callback)
+                        │
+             index.mark_done -> JobEvents.onJobUpdate (JNI callback)
 ```
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `rust/` | Rivium workspace: ledger, queue backend, digest jobs, services, JNI bridge |
+| `rust/` | Rivium workspace: digest index, apalis-sqlite queue, digest jobs, services, JNI bridge |
 | `rust/src/bin/digd.rs` | Desktop daemon (`digd --root <dir>`, URLs on stdin) |
 | `android/` | Gradle project: Compose UI, `DigTileService`, `RustHost`, `JobEvents` |
 | `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
@@ -47,7 +51,8 @@ cargo run --bin digd -- --root ./demo-root
 # Ctrl-D (EOF) stops gracefully
 ```
 
-Results land in `demo-root/data/jobs.db` (SQLite, WAL):
+Results land in `demo-root/data/jobs.db` (the digest index; the durable
+queue is `demo-root/data/queue.db`, both SQLite):
 
 ```sql
 SELECT url, state, title, sha256, attempts, error FROM jobs;
@@ -66,11 +71,13 @@ SELECT url, state, title, sha256, attempts, error FROM jobs;
 
 ## Persistence guarantee
 
-SQLite (`jobs.db`) is the single source of truth; the in-process task
-channel is only transport. On boot the pump resets crash-orphaned `running`
-rows to `queued` and replays every un-finished job — verified by
-`rust/tests/laptop.rs::e2e_sigkill_replay` (SIGKILL mid-fetch, restart,
-same URL completes with the same hash).
+The **durable queue is `apalis-sqlite`** (`queue.db`): pushed tasks are
+persisted with their own WAL journal, and a worker killed mid-task has its
+orphaned task re-enqueued by the backend's heartbeat sweep within seconds of
+the next boot — no hand-written replay logic. The digest index (`jobs.db`)
+records results (title, SHA-256, attempts, error) for the UI and dedupe.
+Recovery is verified by `rust/tests/laptop.rs::e2e_sigkill_replay`
+(SIGKILL mid-fetch, restart, same URL completes with the same hash).
 
 ## Test & verify
 
@@ -88,7 +95,7 @@ cargo clippy --all-targets        # zero warnings
 | Embedded host on Android | `rust/src/android_export.rs` (`JNI_OnLoad`) + `rivium-jni` five-method contract |
 | `App` trait composition | `rust/src/app.rs` (`DiggerApp`: Config/validate/services) |
 | Supervised services | `rust/src/services.rs` (`digest-worker`, `enqueue-pump`, `link-ingest`) |
-| Custom backend | `rust/src/queue.rs` (`ChannelBackend` over tokio mpsc; apalis `Ephemeral` kind) |
+| Durable storage | `apalis-sqlite` `SqliteStorage` (`queue.db`) + digest index (`rust/src/ledger.rs`, statuses use `apalis-core::task::status::Status`) |
 | apalis layers, in order | backend → `parallelize(tokio::spawn)` → `concurrency(n)` → `retry(RetryPolicy::retries(2))` |
 | Logs under `<root>/logs/` | written by the rivium host automatically |
 | Strict CLI (`--root/--config/--set`) | provided by `rivium_host::process::run` |
@@ -101,7 +108,7 @@ cargo clippy --all-targets        # zero warnings
 | One job type | Link digest: fetch a URL, extract `<title>`, record SHA-256 (`rust/src/jobs.rs`) |
 | Runs on a laptop with `cargo run` | `cargo run --bin digd -- --root ./demo-root` — demo GIF at the top of this README |
 | Runs inside the Android app | `JNI_OnLoad` via `rivium-jni` boots the embedded host in-process (`rust/src/android_export.rs`) |
-| Jobs are saved across close/reopen | SQLite ledger is the source of truth; boot replay proven by `rust/tests/laptop.rs::e2e_sigkill_replay` |
+| Jobs are saved across close/reopen | `apalis-sqlite` durable queue — crash recovery proven by `rust/tests/laptop.rs::e2e_sigkill_replay` |
 | One Android feature | **Quick Settings tile** — a tap enqueues, the subtitle shows the pending count (`DigTileService.kt`); progress notifications via JNI callbacks |
 | A short README | This file — what it does, how to run it, versions pinned below |
 | Short video or GIF of it working | `docs/demo.gif` (real terminal run, embedded above) |
@@ -109,5 +116,5 @@ cargo clippy --all-targets        # zero warnings
 
 ## Versions
 
-- Rust 1.99.1 · rivium 0.2.0 · apalis 1.0.0 · jni 0.22.4 · rusqlite 0.32 (bundled)
+- Rust 1.99.1 · rivium 0.2.0 · apalis 1.0.0 · apalis-sqlite 1.0.0 (sqlx 0.9) · jni 0.22.4 · rusqlite 0.32 (bundled)
 - AGP 8.7.3 · Kotlin 2.0.21 · Compose BOM 2024.12.01 · compileSdk 35 · minSdk 26 · arm64-v8a
