@@ -8,6 +8,7 @@
 //! error, attempt count — using apalis-core's own [`Status`] vocabulary so
 //! both views of a job agree.
 
+use crate::jobs::Speaker;
 use apalis_core::task::status::Status;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest as _, Sha256};
@@ -41,6 +42,15 @@ pub struct JobRow {
     pub sha256: Option<String>,
     pub attempts: u32,
     pub error: Option<String>,
+    pub updated_at: i64,
+}
+
+/// One stored speaker, as read by the UI (insertion order preserved).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SpeakerRow {
+    pub name: String,
+    pub role: Option<String>,
+    pub url: String,
     pub updated_at: i64,
 }
 
@@ -81,6 +91,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state);
+CREATE TABLE IF NOT EXISTS speakers (
+    url        TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    role       TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (url, name)
+);
 ";
 
 fn now() -> i64 {
@@ -271,6 +288,46 @@ impl Ledger {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Transactionally replace the speaker list harvested from `url`.
+    /// Re-digesting the directory swaps the stored list in one go; names are
+    /// unique per URL (the pair is the primary key). Returns rows stored.
+    pub fn replace_speakers(&self, url: &str, speakers: &[Speaker]) -> rusqlite::Result<usize> {
+        let conn = self.0.lock().expect("ledger poisoned");
+        // Explicit transaction: an outside reader (the UI hydration
+        // connection) never sees the delete without the re-insert.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM speakers WHERE url = ?1", [url])?;
+        let mut stored = 0usize;
+        for speaker in speakers {
+            stored += tx.execute(
+                "INSERT OR IGNORE INTO speakers (url, name, role, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![url, speaker.name, speaker.role, now()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    /// Every stored speaker, in harvest order (the UI's read model).
+    pub fn speakers(&self) -> rusqlite::Result<Vec<SpeakerRow>> {
+        let conn = self.0.lock().expect("ledger poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT name, role, url, updated_at FROM speakers ORDER BY rowid",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(SpeakerRow {
+                    name: r.get(0)?,
+                    role: r.get(1)?,
+                    url: r.get(2)?,
+                    updated_at: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -342,5 +399,53 @@ mod tests {
         let row = ledger.mark_error(&id, 3, &junk, true).unwrap();
         assert_eq!(row.state, "Failed");
         assert!(row.error.as_ref().unwrap().chars().count() <= 300);
+    }
+
+    #[test]
+    fn speakers_table_swaps_and_dedupes_per_url() {
+        let (_dir, ledger) = temp_ledger();
+        let url = "https://droidcon.co.ke/speakers";
+        let first = vec![
+            Speaker {
+                name: "Harny Otuoniyo".into(),
+                role: Some("Android Engineer at getyourguide".into()),
+            },
+            Speaker {
+                name: "Dinoy Raj".into(),
+                role: None,
+            },
+        ];
+        assert_eq!(ledger.replace_speakers(url, &first).unwrap(), 2);
+        // Same URL again: a full swap, no duplicates even with repeated names.
+        let second = vec![
+            Speaker {
+                name: "Harny Otuoniyo".into(),
+                role: Some("new role".into()),
+            },
+            Speaker {
+                name: "Harny Otuoniyo".into(),
+                role: None,
+            },
+            Speaker {
+                name: "New Speaker".into(),
+                role: None,
+            },
+        ];
+        assert_eq!(ledger.replace_speakers(url, &second).unwrap(), 2);
+        let rows = ledger.speakers().unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["Harny Otuoniyo", "New Speaker"]
+        );
+        assert_eq!(rows[0].role.as_deref(), Some("new role"));
+        assert_eq!(rows[0].url, url);
+        // A different URL keeps its own list.
+        assert_eq!(
+            ledger
+                .replace_speakers("https://droidcon.co.ke/2024/speakers", &first)
+                .unwrap(),
+            2
+        );
+        assert_eq!(ledger.speakers().unwrap().len(), 4);
     }
 }

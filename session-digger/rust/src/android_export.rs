@@ -24,21 +24,17 @@ pub unsafe extern "system" fn JNI_OnLoad(
     }
 
     // 2. Cache class globals and register nativeEnqueue on the same class.
-    let machine = match unsafe { jni::JavaVM::from_raw(vm) } {
-        Ok(machine) => machine,
-        Err(_) => return jni::sys::JNI_ERR,
-    };
+    let machine = unsafe { jni::JavaVM::from_raw(vm) };
     let attached = machine.attach_current_thread_with_config(
-        || {
-            let mut config = jni::AttachConfig::new();
-            config.exceptions_policy(jni::AttachmentExceptionPolicy::Ignore);
-            config
-        },
+        // Ignore pending JVM exceptions during init: init reports its own
+        // jni::errors::Result.
+        || jni::AttachConfig::new().exceptions_policy(jni::AttachmentExceptionPolicy::Ignore),
         None,
         |env: &mut jni::Env<'_>| crate::bridge::init(env),
     );
     match attached {
-        Ok(Ok(())) => registered,
-        _ => jni::sys::JNI_ERR,
+        // attach_current_thread_with_config flattens the closure's Result.
+        Ok(()) => registered,
+        Err(_) => jni::sys::JNI_ERR,
     }
 }

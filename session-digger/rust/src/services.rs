@@ -16,7 +16,7 @@
 //! The digest index (`<root>/data/jobs.db`) mirrors statuses for the UI; the
 //! apalis queue table is the durable source of truth for owed work.
 
-use crate::jobs::{self, DigestJob};
+use crate::jobs::{self, DigestJob, Speaker};
 use crate::ledger::{Admit, JobRow, Ledger};
 use apalis::layers::retry::RetryPolicy;
 use apalis::layers::WorkerBuilderExt;
@@ -50,6 +50,10 @@ const QUIESCE_POLLS: u32 = 3_000; // 5 minutes
 /// forwards to `JobEvents.onJobUpdate` over JNI.
 pub type EventSink = Arc<dyn Fn(&JobRow) + Send + Sync>;
 
+/// Callback invoked when a digest harvests a speaker list; desktop prints,
+/// Android forwards to `JobEvents.onSpeakers` over JNI.
+pub type SpeakerSink = Arc<dyn Fn(&str, &[Speaker]) + Send + Sync>;
+
 /// The worker-side backend: apalis-sqlite woken instantly by SQLite update
 /// hooks (no polling latency between a tile tap and the fetch).
 pub type WorkerBackend =
@@ -63,6 +67,7 @@ pub struct Shared {
     /// Durable apalis-sqlite queue; Clone, so JNI callers and the pump share it.
     pub queue: SqliteStorage<DigestJob>,
     pub events: EventSink,
+    pub speakers_event: SpeakerSink,
     pub concurrency: usize,
     pub request_timeout: Duration,
     pub user_agent: String,
@@ -283,6 +288,23 @@ async fn run_digest(
             {
                 Ok(row) => (shared.events)(&row),
                 Err(e) => tracing::warn!(id = %job.id, error = %e, "ledger mark_done failed"),
+            }
+            // The speakers directory feeds its own read model: swap the
+            // harvested list into the ledger, then hand it to the UI.
+            if !digested.speakers.is_empty() {
+                match shared.ledger.replace_speakers(&job.url, &digested.speakers) {
+                    Ok(stored) => {
+                        tracing::info!(
+                            id = %job.id,
+                            speakers = stored,
+                            "speaker list archived"
+                        );
+                        (shared.speakers_event)(&job.url, &digested.speakers);
+                    }
+                    Err(e) => {
+                        tracing::warn!(id = %job.id, error = %e, "ledger replace_speakers failed")
+                    }
+                }
             }
             Ok(())
         }

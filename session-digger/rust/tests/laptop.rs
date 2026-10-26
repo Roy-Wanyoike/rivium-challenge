@@ -199,6 +199,51 @@ fn e2e_sigkill_replay() {
     assert_eq!(all.len(), 1, "no duplicate rows after replay");
 }
 
+/// Speakers directory: digesting https://droidcon.co.ke/speakers archives
+/// the full speaker list (name + role per row) into the ledger's `speakers`
+/// table, on top of the usual title + SHA-256 record.
+#[test]
+#[ignore = "requires network"]
+fn e2e_speakers_directory() {
+    let root = temp_root("speakers");
+    let mut digd = Daemon::spawn(&root);
+    digd.submit("https://droidcon.co.ke/speakers");
+
+    wait_for(
+        &root,
+        "SELECT url, sha256, attempts FROM jobs \
+         WHERE url = 'https://droidcon.co.ke/speakers' AND state = 'Done'",
+        "done speakers row",
+    );
+    let deadline = Instant::now() + BUDGET;
+    let speakers = loop {
+        assert!(deadline > Instant::now(), "speaker list never archived");
+        let rows = query(
+            &root,
+            "SELECT name, coalesce(role, ''), updated_at FROM speakers \
+             WHERE url = 'https://droidcon.co.ke/speakers'",
+        );
+        if !rows.is_empty() {
+            break rows;
+        }
+        std::thread::sleep(POLL);
+    };
+    assert!(
+        speakers.len() >= 5,
+        "expected the full directory, got {} rows",
+        speakers.len()
+    );
+    assert!(
+        speakers.iter().all(|(name, _, _)| !name.trim().is_empty()),
+        "speaker names must be non-empty: {speakers:?}"
+    );
+
+    // EOF stops the host; exit code 0 means a clean drain.
+    drop(digd.stdin.take());
+    let status = digd.child.wait().expect("wait for digd exit");
+    assert!(status.success(), "graceful EOF stop must exit 0");
+}
+
 /// Failure path: a 404 URL is retried `MAX_ATTEMPTS` times, then parks in
 /// `failed`; a later `!URL` line re-queues it for a fresh round.
 #[test]

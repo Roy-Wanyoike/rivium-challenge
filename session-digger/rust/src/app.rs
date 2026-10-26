@@ -5,9 +5,9 @@
 //! Durable queue state lives in apalis-sqlite under `<root>/data/queue.db`;
 //! the digest index (results, titles, hashes) in `<root>/data/jobs.db`.
 
-use crate::jobs::DigestJob;
+use crate::jobs::{DigestJob, Speaker};
 use crate::ledger::{JobRow, Ledger};
-use crate::services::{self, EventSink, Shared, WorkerBackend};
+use crate::services::{self, EventSink, Shared, SpeakerSink, WorkerBackend};
 use apalis_core::backend::ext::BackendExt;
 use apalis_sqlite::{Config as QueueConfig, SqliteStorage};
 use rivium::{Error, Result, Service};
@@ -130,12 +130,14 @@ impl rivium_host::App for DiggerApp {
         let (enqueue_tx, enqueue_rx) = mpsc::unbounded_channel();
 
         let events: EventSink = Arc::new(emit_row);
+        let speakers_event: SpeakerSink = Arc::new(emit_speakers);
 
         let shared = Arc::new(Shared {
             ledger: Arc::new(ledger),
             enqueue_tx,
             queue,
             events,
+            speakers_event,
             concurrency: config.concurrency,
             request_timeout: Duration::from_secs(config.request_timeout_secs),
             user_agent: config.user_agent.clone(),
@@ -171,5 +173,23 @@ fn emit_row(row: &JobRow) {
             _ => String::new(),
         };
         println!("digd [{:>7}] {} {}", row.state, row.url, detail);
+    }
+}
+
+/// A harvested speaker list funnels through here.
+fn emit_speakers(url: &str, speakers: &[Speaker]) {
+    #[cfg(target_os = "android")]
+    crate::bridge::emit_speakers(url, speakers);
+
+    #[cfg(not(target_os = "android"))]
+    {
+        println!("digd [{:>7}] {} harvested {} speakers", "Done", url, speakers.len());
+        for speaker in speakers {
+            println!(
+                "  · {} — {}",
+                speaker.name,
+                speaker.role.as_deref().unwrap_or("")
+            );
+        }
     }
 }
