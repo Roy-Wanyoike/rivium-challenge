@@ -5,6 +5,8 @@ extracts the page title, and records its **SHA-256** — with crash-safe
 persistence and a Material 3 Android front-end including a **Quick Settings
 tile**.
 
+![session-digger terminal demo — enqueue, digest, retry, ledger](docs/demo.gif)
+
 ```
 QS tile ─┐                          ┌─> notifications
 Compose ─┼─> NativeBridge.nativeEnqueue (JNI)
@@ -34,6 +36,7 @@ stdin ───┘            │
 | `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
 | `docs/device-testing.md` | 8-step real-device checklist with logcat filters |
 | `docs/demo-script.md` | 90-second screen-recording script |
+| `docs/demo.gif` | Terminal demo GIF of a real laptop run (top of this README) |
 
 ## Desktop quick start
 
@@ -91,6 +94,20 @@ cargo clippy --all-targets        # zero warnings
 | apalis layers, in order | backend → `parallelize(tokio::spawn)` → `concurrency(n)` → `retry(RetryPolicy::retries(2))` |
 | Logs under `<root>/logs/` | written by the rivium host automatically |
 | Strict CLI (`--root/--config/--set`) | provided by `rivium_host::process::run` |
+
+## Challenge must-haves (how this repo addresses them)
+
+| Challenge requirement | Addressed by |
+| --- | --- |
+| Rust code uses both Rivium and Apalis | `rust/` — rivium 0.2.0 `App` + supervised services, apalis 1.0.0 worker (map below) |
+| One job type | Link digest: fetch a URL, extract `<title>`, record SHA-256 (`rust/src/jobs.rs`) |
+| Runs on a laptop with `cargo run` | `cargo run --bin digd -- --root ./demo-root` — demo GIF at the top of this README |
+| Runs inside the Android app | `JNI_OnLoad` via `rivium-jni` boots the embedded host in-process (`rust/src/android_export.rs`) |
+| Jobs are saved across close/reopen | SQLite ledger is the source of truth; boot replay proven by `rust/tests/laptop.rs::e2e_sigkill_replay` |
+| One Android feature | **Quick Settings tile** — a tap enqueues, the subtitle shows the pending count (`DigTileService.kt`); progress notifications via JNI callbacks |
+| A short README | This file — what it does, how to run it, versions pinned below |
+| Short video or GIF of it working | `docs/demo.gif` (real terminal run, embedded above); the phone recording follows `docs/demo-script.md` |
+| Bonus (+10): real-device testing | 8-step checklist with logcat filters in `docs/device-testing.md` |
 
 ## Versions
 
