@@ -34,8 +34,6 @@ stdin ───┘            │
 | `rust/src/bin/digd.rs` | Desktop daemon (`digd --root <dir>`, URLs on stdin) |
 | `android/` | Gradle project: Compose UI, `DigTileService`, `RustHost`, `JobEvents` |
 | `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
-| `docs/device-testing.md` | 8-step real-device checklist with logcat filters |
-| `docs/demo-script.md` | 90-second screen-recording script |
 | `docs/demo.gif` | Terminal demo GIF of a real laptop run (top of this README) |
 
 ## Desktop quick start
@@ -106,8 +104,8 @@ cargo clippy --all-targets        # zero warnings
 | Jobs are saved across close/reopen | SQLite ledger is the source of truth; boot replay proven by `rust/tests/laptop.rs::e2e_sigkill_replay` |
 | One Android feature | **Quick Settings tile** — a tap enqueues, the subtitle shows the pending count (`DigTileService.kt`); progress notifications via JNI callbacks |
 | A short README | This file — what it does, how to run it, versions pinned below |
-| Short video or GIF of it working | `docs/demo.gif` (real terminal run, embedded above); the phone recording follows `docs/demo-script.md` |
-| Bonus (+10): real-device testing | 8-step checklist with logcat filters in `docs/device-testing.md` |
+| Short video or GIF of it working | `docs/demo.gif` (real terminal run, embedded above) |
+| Bonus (+10): real-device testing | pending — phone run results (logcat + photos) will be posted as a PR comment after the device test |
 
 ## Versions
 
