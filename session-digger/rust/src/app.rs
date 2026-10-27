@@ -26,6 +26,12 @@ pub struct Config {
     pub request_timeout_secs: u64,
     /// Sent with every fetch; droidcon-hosted pages should recognize us.
     pub user_agent: String,
+    /// Desktop only (requires the cargo `board` feature): bind address for
+    /// the apalis-board queue inspector UI. Empty = disabled.
+    /// Example: `cargo run --features board --bin digd -- --root ./demo-root
+    /// --set board_addr=127.0.0.1:8080`.
+    #[serde(default)]
+    pub board_addr: String,
 }
 
 impl Default for Config {
@@ -39,6 +45,7 @@ impl Default for Config {
                 " (droidcon Kenya challenge)"
             )
             .to_string(),
+            board_addr: String::new(),
         }
     }
 }
@@ -117,6 +124,13 @@ impl rivium_host::App for DiggerApp {
         if config.user_agent.trim().is_empty() {
             return Err(Error::invalid_input("user_agent must not be empty"));
         }
+        if !config.board_addr.is_empty() {
+            if let Err(e) = config.board_addr.parse::<std::net::SocketAddr>() {
+                return Err(Error::invalid_input(format!(
+                    "board_addr must be a socket address (e.g. 127.0.0.1:8080): {e}"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -125,6 +139,11 @@ impl rivium_host::App for DiggerApp {
         let ledger =
             Ledger::open(&root).map_err(|e| Error::internal(format!("ledger open: {e}")))?;
         let (queue, worker_backend) = open_queue(&root)?;
+        // The board inspects the durable queue itself, so hand it a clone of
+        // the same storage handle the pump pushes through (taken before the
+        // move into `Shared`).
+        #[cfg(all(feature = "board", not(target_os = "android")))]
+        let board_queue = queue.clone();
 
         // Transport channel: raw URL strings from stdin (desktop) or JNI.
         let (enqueue_tx, enqueue_rx) = mpsc::unbounded_channel();
@@ -154,6 +173,15 @@ impl rivium_host::App for DiggerApp {
             roots.push(services::link_ingest(lines_tx, lines_rx));
         }
         roots.push(services::enqueue_pump(shared, enqueue_rx));
+        // Opt-in desktop queue inspector (apalis-board); see `Config::board_addr`.
+        #[cfg(all(feature = "board", not(target_os = "android")))]
+        if !config.board_addr.is_empty() {
+            let addr = config
+                .board_addr
+                .parse::<std::net::SocketAddr>()
+                .map_err(|e| Error::internal(format!("board_addr: {e}")));
+            roots.push(services::board_server(board_queue, addr?));
+        }
         Ok(roots)
     }
 }

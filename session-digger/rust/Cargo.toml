@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "droidcon Kenya link digger built on the Rivium app runtime"
 
+[features]
+default = []
+# Desktop-only queue inspector UI (apalis-board), opt-in so the default
+# `cargo run --bin digd` build and the Android cdylib stay lean.
+board = ["dep:apalis-board", "dep:axum"]
+
 [dependencies]
 rivium = { version = "0.2.0", features = ["full"] }
 apalis = { version = "1.0.0", features = ["retry", "limit"] }
@@ -21,6 +27,10 @@ futures = "0.3"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rivium-host = { version = "0.2.0", features = ["process"] }
+# Optional, desktop-only: the apalis-board queue inspector (web UI + API).
+# `ui` serves the prebuilt frontend via include_dir; no wasm build needed.
+apalis-board = { version = "1.0.0", features = ["axum", "ui"], optional = true }
+axum = { version = "0.8", features = ["json", "tokio", "query"], optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"

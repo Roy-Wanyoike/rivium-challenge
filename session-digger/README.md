@@ -113,6 +113,32 @@ is `demo-root/data/queue.db`, both SQLite):
 SELECT url, state, title, sha256, attempts, error FROM jobs;
 ```
 
+### Watch the queue (apalis-board)
+
+The desktop daemon can also serve the [apalis-board](https://github.com/apalis-dev/apalis-board)
+queue inspector — a live web UI over the **same durable `SqliteStorage` the
+pump pushes through**, not a copy:
+
+```bash
+cd rust
+cargo run --features board --bin digd -- --root ./demo-root --set board_addr=127.0.0.1:8080
+# open http://127.0.0.1:8080
+```
+
+Real jobs from this queue (Done tab shows the two successful droidcon digests;
+the Failed tab shows the 404 URL at attempt 3 — the retry cap in action):
+
+![apalis-board inspecting the digest queue — two Done tasks by dig-worker, attempt badges, healthy system status](docs/board-digest-done.png)
+
+The overview aggregates the backend stats (jobs/hour, success rate, backlog,
+worker health):
+
+![apalis-board overview — done jobs, failed jobs, success rate, system status healthy](docs/board-overview.png)
+
+The integration is deliberately opt-in: the cargo `board` feature pulls the
+dependency and `--set board_addr=...` starts the service, so the default
+build and the Android binary stay lean.
+
 ## Android quick start
 
 1. Install Rust + `cargo install cargo-ndk`, plus an NDK (`ANDROID_NDK_HOME`).
@@ -182,6 +208,7 @@ SELECT url, state, title, sha256, attempts, error FROM jobs;
 | `docs/demo-video.webp` | The captioned demo as an animated WebP — plays inline in this README |
 | `docs/demo.mp4` | Captioned video of a real laptop run, no audio (link at the top) |
 | `docs/demo.gif` | Terminal demo GIF of a real laptop run |
+| `docs/board-digest-done.png`, `docs/board-overview.png` | apalis-board inspecting the real digest queue (Done tasks + backend stats) |
 
 ## Challenge must-haves (how this repo addresses them)
 
@@ -199,5 +226,5 @@ SELECT url, state, title, sha256, attempts, error FROM jobs;
 
 ## Versions
 
-- Rust 1.99.1 · rivium 0.2.0 · apalis 1.0.0 · apalis-sqlite 1.0.0 (sqlx 0.9) · jni 0.22.4 · rusqlite 0.32 (bundled)
+- Rust 1.99.1 · rivium 0.2.0 · apalis 1.0.0 · apalis-sqlite 1.0.0 (sqlx 0.9) · apalis-board 1.0.0 (desktop, `board` feature) · jni 0.22.4 · rusqlite 0.32 (bundled)
 - AGP 8.7.3 · Kotlin 2.0.21 · Compose BOM 2024.12.01 · compileSdk 35 · minSdk 26 · arm64-v8a

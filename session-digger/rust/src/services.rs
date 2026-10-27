@@ -338,6 +338,42 @@ fn fail(
     error
 }
 
+/// The apalis-board queue inspector as a supervised rivium service.
+///
+/// Desktop-only and opt-in on two axes (the challenge's "keep it small"):
+/// the cargo `board` feature pulls the dependency, and a non-empty
+/// `board_addr` config (`--set board_addr=127.0.0.1:8080`) starts the
+/// service. The UI registers the SAME `SqliteStorage` clone the pump pushes
+/// through, so the dashboard reflects the durable queue itself — not a
+/// copy. Android never compiles this.
+#[cfg(all(feature = "board", not(target_os = "android")))]
+pub fn board_server(queue: SqliteStorage<DigestJob>, addr: std::net::SocketAddr) -> Box<dyn Service> {
+    service("board", Kind::Frontline, move |ctx: Context| async move {
+        // SSE hub for the UI's /logs page; rivium owns the global tracing
+        // subscriber, so live log streaming stays empty unless the host is
+        // re-launched with the board's subscriber layer composed in.
+        let broadcaster = apalis_board::axum::sse::TracingBroadcaster::create();
+        use apalis_board::axum::framework::{ApiBuilder, RegisterRoute};
+        let api = ApiBuilder::new(axum::Router::new())
+            .register("digest", queue)
+            .build();
+        let router = axum::Router::new()
+            .nest("/api/v1", api)
+            .fallback_service(apalis_board::axum::ui::ServeUI::new())
+            .layer(axum::Extension(broadcaster));
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| Error::internal(format!("board bind {addr}: {e}")))?;
+        tracing::info!("apalis-board UI on http://{addr}");
+        ctx.ready();
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move { ctx.stopped().await })
+            .await
+            .map_err(|e| Error::internal(format!("board serve: {e}")))?;
+        Ok(())
+    })
+}
+
 #[cfg(not(target_os = "android"))]
 /// Desktop ingest: URL lines from stdin; EOF requests a graceful stop.
 /// `lines_tx` is the feeding end for the supervised stdin-reader child.
