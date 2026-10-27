@@ -31,6 +31,12 @@ services: `digest-worker`, `enqueue-pump`, and (desktop) `link-ingest`.
 
 ![session-digger terminal demo — enqueue, digest, retry, speakers, ledger](docs/demo.gif)
 
+A captioned video of the same kind of run (real `digd` session, no audio —
+the captions tell the story: durable queue, title + SHA-256, the speakers
+harvest, the 404 retry path, and EOF):
+
+![session-digger captioned terminal demo — real run, no audio](docs/demo.mp4)
+
 ```
 QS tile ─┐                          ┌─> notifications
 Compose ─┼─> NativeBridge.nativeEnqueue (JNI)
@@ -89,6 +95,7 @@ sqlite3 demo-root/data/jobs.db 'SELECT name, role FROM speakers;'
 | `android/` | Gradle project: Compose UI (Digests + Speakers tabs), `DigTileService`, `RustHost`, `JobEvents`, `DigestStore` |
 | `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
 | `docs/demo.gif` | Terminal demo GIF of a real laptop run (top of this README) |
+| `docs/demo.mp4` | Captioned video of a real laptop run, no audio (top of this README) |
 
 ## Desktop quick start
 
