@@ -170,7 +170,7 @@ cargo clippy --all-targets        # zero warnings
 | Jobs are saved across close/reopen | `apalis-sqlite` durable queue — crash recovery proven by `rust/tests/laptop.rs::e2e_sigkill_replay`; the UI rehydrates both tabs from the SQLite mirror (`DigestStore.kt`) |
 | One Android feature | **Quick Settings tile** — a tap enqueues, the subtitle shows the pending count (`DigTileService.kt`); progress notifications via JNI callbacks |
 | A short README | This file — what it does, how to run it, versions pinned below |
-| Short video or GIF of it working | `docs/demo.gif` (real terminal run, embedded above) |
+| Short video or GIF of it working | `docs/demo.gif` and `docs/demo.mp4` (captioned, no audio) — both real terminal runs, embedded above |
 | Bonus (+10): real-device testing | pending — phone run results (logcat + photos) will be posted as a PR comment after the device test |
 
 ## Versions
