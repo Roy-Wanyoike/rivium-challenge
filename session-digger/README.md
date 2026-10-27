@@ -1,41 +1,51 @@
-# session-digger — droidcon Kenya link digger
+# session-digger — a pocket backend for droidcon Kenya
 
-A **Rivium** application that digests droidcon.co.ke links: fetches a URL,
-extracts the page title, and records its **SHA-256** — with crash-safe
-persistence and a Material 3 Android front-end including a **Quick Settings
-tile**.
+Tap the **Digger** Quick Settings tile (or paste a link in the app, or pipe URLs
+from a laptop): an [Apalis](https://github.com/apalis-dev/apalis) job queue
+running inside a [Rivium](https://github.com/rivium-rs/rivium) service *in the
+app process* fetches the page, records its **title + SHA-256**, and shows the
+result on the phone. Kill the app mid-job — the job still finishes when you
+reopen it.
+
+**The captioned demo** (a real `digd` session, no audio — the captions narrate
+the durable queue, the title + SHA-256 record, the 12-speaker harvest, the 404
+retry path, and the EOF drain; every terminal line is the actual program
+output, in the actual order):
+
+![session-digger captioned demo — a real terminal run, playing inline](docs/demo-video.webp)
+
+- ▶ [**Watch the full video (25 s, 1280×720)**](https://github.com/Roy-Wanyoike/rivium-challenge/blob/main/session-digger/docs/demo.mp4) — committed in this PR as `docs/demo.mp4`
+- `docs/demo.gif` — the same kind of run as a plain terminal GIF
 
 ## What session-digger does
 
-droidcon Kenya publishes talks, speakers, and sponsors as web pages that
-change without notice. session-digger is a pocket backend that keeps proof of
-what a page actually contained when you saved it:
+droidcon Kenya publishes talks, speakers, and sponsors as web pages that change
+without notice. session-digger is a pocket backend that keeps proof of what a
+page actually contained when you saved it:
 
-- **Dig any droidcon link** — paste it in the app, tap the **Digger** Quick
-  Settings tile, or pipe URLs to the desktop daemon. Each job is fetched,
-  its `<title>` extracted, and the SHA-256 of the raw body recorded.
-- **Jobs survive the process** — every task is persisted in an
-  `apalis-sqlite` durable queue before it runs; a kill mid-fetch is healed by
-  the backend's heartbeat sweep on the next boot (proven by a SIGKILL e2e
-  test, no hand-written replay logic).
-- **Watch results live** — the Rust worker pushes every state transition
-  over JNI: the Compose list updates in place, the QS tile subtitle counts
-  pending jobs, and terminal states raise a notification.
-- **View the list of speakers** — the droidcon **speakers directory** gets
-  special treatment: digesting `droidcon.co.ke/speakers` additionally
-  harvests every speaker's name and role into the ledger, shown in the
-  app's **Speakers** tab (see below).
+* **Three ways in, one way out** — the in-app **Dig** button, the **Quick
+  Settings tile** (a tap enqueues; the tile subtitle counts pending jobs), or
+  the desktop daemon `digd` reading URLs on stdin. They all feed the same
+  queue, and results come back the same way: the Compose list updates in
+  place, and terminal states raise a notification.
+* **One job type: `DigestJob`** — fetch a URL (reqwest, 20 s timeout, 8 MiB
+  cap), extract the page `<title>`, record the SHA-256 of the raw body. The
+  droidcon **speakers directory** gets special treatment: digesting it also
+  harvests every speaker card (`<h4>` name + role) with the same no-regex
+  scanner, so the app's **Speakers** tab shows the full list.
+* **Jobs survive the process** — every task is persisted in an
+  `apalis-sqlite` durable queue *before* it runs (WAL journal). A worker
+  killed mid-fetch has its orphaned task re-enqueued by the backend's
+  heartbeat sweep on the next boot — no hand-written replay logic. The digest
+  index (`jobs.db`, also SQLite) keeps every transition, and the UI rehydrates
+  both tabs from it at startup.
+* **Desktop parity** — the same worker, queue, and ledger run on a laptop as
+  `digd`; `docs/demo.mp4` is a recording of exactly that code path.
 
-One job type (`DigestJob`), one embedded Rust host, three supervised
-services: `digest-worker`, `enqueue-pump`, and (desktop) `link-ingest`.
+One embedded Rust host, three supervised services: `digest-worker`,
+`enqueue-pump`, and (desktop) `link-ingest`.
 
-![session-digger terminal demo — enqueue, digest, retry, speakers, ledger](docs/demo.gif)
-
-A captioned video of the same kind of run (real `digd` session, no audio —
-the captions tell the story: durable queue, title + SHA-256, the speakers
-harvest, the 404 retry path, and EOF):
-
-![session-digger captioned terminal demo — real run, no audio](docs/demo.mp4)
+## Architecture
 
 ```
 QS tile ─┐                          ┌─> notifications
@@ -63,15 +73,13 @@ stdin ───┘            │
                                     JobEvents.onSpeakers  <────────────┘
 ```
 
-## View the speaker list
-
-When one wants to view the list of speakers, the app has a dedicated tab:
+## View the list of speakers
 
 1. Open **Speakers** and tap **Load speaker list** — the app enqueues
    `https://droidcon.co.ke/speakers` like any other link.
 2. The worker digests the page (title + SHA-256 as usual) and, because the
-   URL is the speakers directory, also harvests each speaker card
-   (`<h4>` name plus role paragraph) into the ledger's `speakers` table.
+   URL is the speakers directory, also harvests each speaker card into the
+   ledger's `speakers` table.
 3. The list is pushed to the UI over a second JNI callback
    (`JobEvents.onSpeakers`) and rendered as cards. It is persisted in the
    ledger, so it reopens with the app — both tabs rehydrate from the same
@@ -86,31 +94,20 @@ cargo run --bin digd -- --root ./demo-root
 sqlite3 demo-root/data/jobs.db 'SELECT name, role FROM speakers;'
 ```
 
-## Layout
-
-| Path | What |
-| --- | --- |
-| `rust/` | Rivium workspace: digest index, apalis-sqlite queue, digest jobs (title/SHA-256/speaker harvest), services, JNI bridge |
-| `rust/src/bin/digd.rs` | Desktop daemon (`digd --root <dir>`, URLs on stdin) |
-| `android/` | Gradle project: Compose UI (Digests + Speakers tabs), `DigTileService`, `RustHost`, `JobEvents`, `DigestStore` |
-| `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
-| `docs/demo.gif` | Terminal demo GIF of a real laptop run (top of this README) |
-| `docs/demo.mp4` | Captioned video of a real laptop run, no audio (top of this README) |
-
-## Desktop quick start
+## Laptop quick start (no phone needed)
 
 ```bash
-cd rust
+cd session-digger/rust
 cargo run --bin digd -- --root ./demo-root
 # paste URLs, one per line:
 #   https://droidcon.co.ke
 #   https://droidcon.co.ke/speakers  ← also harvests the speaker list
 #   !https://droidcon.co.ke/broken   ← re-queue a failed job
-# Ctrl-D (EOF) stops gracefully
+# Ctrl-D (EOF) stops gracefully (exit 0)
 ```
 
-Results land in `demo-root/data/jobs.db` (the digest index; the durable
-queue is `demo-root/data/queue.db`, both SQLite):
+Results land in `demo-root/data/jobs.db` (the digest index; the durable queue
+is `demo-root/data/queue.db`, both SQLite):
 
 ```sql
 SELECT url, state, title, sha256, attempts, error FROM jobs;
@@ -119,7 +116,7 @@ SELECT url, state, title, sha256, attempts, error FROM jobs;
 ## Android quick start
 
 1. Install Rust + `cargo install cargo-ndk`, plus an NDK (`ANDROID_NDK_HOME`).
-2. `cd android && ./gradlew :app:assembleDebug`
+2. `cd session-digger/android && ./gradlew :app:assembleDebug`
    — Gradle runs `scripts/build-android-rust.sh` via the `preBuild` hook and
    packages `libsession_digger.so` (arm64-v8a). Without a Rust toolchain the
    script degrades to a no-op so Kotlin-only builds still compile.
@@ -127,25 +124,40 @@ SELECT url, state, title, sha256, attempts, error FROM jobs;
    - tap **Dig** in the app, or
    - pull down Quick Settings, add the **Digger** tile, tap it.
 
-## Persistence guarantee
+## What was verified
 
-The **durable queue is `apalis-sqlite`** (`queue.db`): pushed tasks are
-persisted with their own WAL journal, and a worker killed mid-task has its
-orphaned task re-enqueued by the backend's heartbeat sweep within seconds of
-the next boot — no hand-written replay logic. The digest index (`jobs.db`)
-records results (title, SHA-256, attempts, error) plus the archived speaker
-list for the UI, dedupe, and startup rehydration. Recovery is verified by
-`rust/tests/laptop.rs::e2e_sigkill_replay` (SIGKILL mid-fetch, restart, same
-URL completes with the same hash).
+* **Laptop, live:** `cargo test` — 12 unit tests; `cargo test --test laptop --
+  --ignored` — 4 live e2e against droidcon.co.ke (happy path → `Done` with a
+  64-hex hash; **SIGKILL mid-fetch → restart → the same job completes with the
+  same hash**; 404 → exactly 3 attempts → `Failed` → `!URL` requeue; speakers
+  directory → `Done` + 12 speakers archived); `cargo clippy --all-targets` —
+  zero warnings.
+* **Android toolchain:** `./gradlew :app:assembleDebug` verified on a clean
+  toolchain (AGP 8.7.3 · SDK 35 · NDK r27 · cargo-ndk 4.1.2 · JDK 17) — the
+  APK packages the stripped `libsession_digger.so` and registers
+  `DigTileService` for the QS tile. Five build-blocking defects in the
+  committed tree were found and fixed while doing this (see the PR notes).
+* **Not yet verified on hardware:** a tap-through on a physical phone. The
+  debug APK is attached to the PR; device run results (logcat + photos) will
+  be posted as a PR comment.
 
-## Test & verify
+## Findings that may be useful to the maintainers
 
-```bash
-cd rust
-cargo test                        # unit tests (ledger, entity decoding, speaker harvest)
-cargo test --test laptop -- --ignored   # live e2e vs droidcon.co.ke
-cargo clippy --all-targets        # zero warnings
-```
+1. **`cargo-ndk` skips its copy step when the crate is both `rlib` and
+   `cdylib`** — the `.so` must be copied into `jniLibs` by the build script
+   (`scripts/build-android-rust.sh` does this explicitly).
+2. **A desktop binary linked against `rivium-host` with the `process` feature
+   cannot compile for Android targets** — the NDK build must pass `--lib` so
+   only the JNI cdylib is built.
+3. **Kotlin synthetic properties differ from the Kotlin API**: the QS tile
+   service must read `qsTile` (the synthetic property), not `tile` — the
+   service compiled fine either way, so this only surfaced at runtime review.
+4. **`TextOverflow.MiddleEllipsis` needs Compose UI 1.8** — with Compose BOM
+   2024.12.01 (UI 1.7.6) the code must use `Ellipsis`.
+5. **The apalis-sqlite heartbeat sweep is the recovery story** — orphaned
+   tasks are re-enqueued by the backend itself within seconds of the next
+   boot; we verified this by SIGKILL-ing a worker mid-fetch in an e2e test
+   rather than writing replay logic.
 
 ## Rivium usage map (challenge scoring)
 
@@ -159,18 +171,30 @@ cargo clippy --all-targets        # zero warnings
 | Logs under `<root>/logs/` | written by the rivium host automatically |
 | Strict CLI (`--root/--config/--set`) | provided by `rivium_host::process::run` |
 
+## Layout
+
+| Path | What |
+| --- | --- |
+| `rust/` | Rivium workspace: digest index, apalis-sqlite queue, digest jobs (title/SHA-256/speaker harvest), services, JNI bridge |
+| `rust/src/bin/digd.rs` | Desktop daemon (`digd --root <dir>`, URLs on stdin) |
+| `android/` | Gradle project: Compose UI (Digests + Speakers tabs), `DigTileService`, `RustHost`, `JobEvents`, `DigestStore` |
+| `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
+| `docs/demo-video.webp` | The captioned demo as an animated WebP — plays inline in this README |
+| `docs/demo.mp4` | Captioned video of a real laptop run, no audio (link at the top) |
+| `docs/demo.gif` | Terminal demo GIF of a real laptop run |
+
 ## Challenge must-haves (how this repo addresses them)
 
 | Challenge requirement | Addressed by |
 | --- | --- |
 | Rust code uses both Rivium and Apalis | `rust/` — rivium 0.2.0 `App` + supervised services, apalis 1.0.0 worker (map above) |
 | One job type | Link digest: fetch a URL, extract `<title>`, record SHA-256 (`rust/src/jobs.rs`) — the speaker list is derived from that same digest of the speakers directory |
-| Runs on a laptop with `cargo run` | `cargo run --bin digd -- --root ./demo-root` — demo GIF at the top of this README |
+| Runs on a laptop with `cargo run` | `cargo run --bin digd -- --root ./demo-root` — demo WebP/video at the top of this README |
 | Runs inside the Android app | `JNI_OnLoad` via `rivium-jni` boots the embedded host in-process (`rust/src/android_export.rs`) |
 | Jobs are saved across close/reopen | `apalis-sqlite` durable queue — crash recovery proven by `rust/tests/laptop.rs::e2e_sigkill_replay`; the UI rehydrates both tabs from the SQLite mirror (`DigestStore.kt`) |
 | One Android feature | **Quick Settings tile** — a tap enqueues, the subtitle shows the pending count (`DigTileService.kt`); progress notifications via JNI callbacks |
 | A short README | This file — what it does, how to run it, versions pinned below |
-| Short video or GIF of it working | `docs/demo.gif` and `docs/demo.mp4` (captioned, no audio) — both real terminal runs, embedded above |
+| Short video or GIF of it working | `docs/demo-video.webp` (plays inline above) + `docs/demo.mp4` (captioned, no audio) + `docs/demo.gif` — all real runs |
 | Bonus (+10): real-device testing | pending — phone run results (logcat + photos) will be posted as a PR comment after the device test |
 
 ## Versions
