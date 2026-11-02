@@ -106,10 +106,13 @@ cp -f "$APK_SRC" "$SESSION_DIR/debug.apk"
 
 # ---------------------------------------------------------------------------
 # 5. Sanity check the artifact the CI contract expects.
+#    (grep without -q on purpose: -q exits early, SIGPIPEs unzip, and
+#    pipefail then fails the check even on a match.)
 # ---------------------------------------------------------------------------
-unzip -l "$SESSION_DIR/debug.apk" | grep -q "lib/arm64-v8a/libsession_digger.so" \
+APK_LISTING="$(unzip -l "$SESSION_DIR/debug.apk")"
+grep -q "lib/arm64-v8a/libsession_digger.so" <<<"$APK_LISTING" \
     || die "debug.apk does not embed libsession_digger.so — check the jniLibs wiring."
-unzip -l "$SESSION_DIR/debug.apk" | grep -q "classes.dex" \
+grep -q "classes.dex" <<<"$APK_LISTING" \
     || die "debug.apk has no classes.dex — Kotlin build incomplete?"
 
 log "SUCCESS: $SESSION_DIR/debug.apk ($(wc -c < "$SESSION_DIR/debug.apk") bytes)"
