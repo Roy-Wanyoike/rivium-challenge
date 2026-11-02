@@ -141,6 +141,16 @@ build and the Android binary stay lean.
 
 ## Android quick start
 
+One command does everything (installs missing Rust/cargo-ndk, finds the
+SDK/NDK, cross-compiles the core, builds the app, writes
+`session-digger/debug.apk` — this is the script the challenge CI runs):
+
+```bash
+bash session-digger/build.sh
+```
+
+Manual equivalent:
+
 1. Install Rust + `cargo install cargo-ndk`, plus an NDK (`ANDROID_NDK_HOME`).
 2. `cd session-digger/android && ./gradlew :app:assembleDebug`
    — Gradle runs `scripts/build-android-rust.sh` via the `preBuild` hook and
@@ -205,6 +215,7 @@ build and the Android binary stay lean.
 | `rust/src/bin/digd.rs` | Desktop daemon (`digd --root <dir>`, URLs on stdin) |
 | `android/` | Gradle project: Compose UI (Digests + Speakers tabs), `DigTileService`, `RustHost`, `JobEvents`, `DigestStore` |
 | `scripts/build-android-rust.sh` | `cargo-ndk` arm64-v8a build hooked into `preBuild` |
+| `build.sh` | One-command debug APK (bootstraps the toolchain); the challenge CI entry point |
 | `docs/demo-video.webp` | The captioned demo as an animated WebP — plays inline in this README |
 | `docs/demo.mp4` | Captioned video of a real laptop run, no audio (link at the top) |
 | `docs/demo.gif` | Terminal demo GIF of a real laptop run |
