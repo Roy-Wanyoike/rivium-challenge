@@ -1,0 +1,39 @@
+# After Build APK finishes, commit app-name/debug.apk onto a review branch
+# in this repository and comment the download link on the pull request.
+# Runs from the default branch so forked pull requests cannot change it,
+# and so the job has permission to push and comment.
+name: Comment APK link
+
+on:
+  workflow_run:
+    workflows: ["Build APK"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Commit APK and comment
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      (github.event.workflow_run.conclusion == 'success' ||
+       github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the comment script from the default branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Commit APK and comment on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: bash .github/scripts/comment-apk.sh

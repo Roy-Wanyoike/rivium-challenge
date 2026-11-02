@@ -1,0 +1,68 @@
+# Builds a submission's debug APK when its pull request is opened or updated.
+# The PR title must start with the submission folder name, e.g.
+#   [app-name]: Add my rivium client
+# Each submission owns its toolchain via app-name/build.sh.
+# comment-apk.yml then commits app-name/debug.apk and comments the link.
+name: Build APK
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: Submission folder to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build debug APK
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Resolve submission folder
+        id: app
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+          DISPATCH_APP: ${{ github.event.inputs.app_name || '' }}
+        run: bash .github/scripts/resolve-app-name.sh
+
+      - name: Build with submission build.sh
+        if: steps.app.outputs.skip != 'true'
+        run: bash "${{ steps.app.outputs.name }}/build.sh"
+
+      - name: Place debug.apk in the submission folder
+        id: apk
+        if: steps.app.outputs.skip != 'true'
+        env:
+          APP_NAME: ${{ steps.app.outputs.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+        run: bash .github/scripts/place-debug-apk.sh
+
+      - name: Upload debug APK
+        if: steps.app.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: |
+            ${{ steps.app.outputs.name }}/debug.apk
+            apk-meta.env
+          if-no-files-found: error
+          retention-days: 14
