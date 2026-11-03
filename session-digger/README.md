@@ -1,16 +1,19 @@
 # session-digger — a pocket backend for droidcon Kenya
 
-Tap the **Digger** Quick Settings tile (or paste a link in the app, or pipe URLs
-from a laptop): an [Apalis](https://github.com/apalis-dev/apalis) job queue
-running inside a [Rivium](https://github.com/rivium-rs/rivium) service *in the
-app process* fetches the page, records its **title + SHA-256**, and shows the
-result on the phone. Kill the app mid-job — the job still finishes when you
-reopen it.
+droidcon Kenya publishes talks, speakers, and sponsors as web pages that change
+without notice. session-digger keeps **proof of what a page actually contained
+when you saved it**. Tap the **Digger** Quick Settings tile (or paste a link in
+the app, or pipe URLs from a laptop): an [Apalis](https://github.com/apalis-dev/apalis)
+job queue running inside a [Rivium](https://github.com/rivium-rs/rivium) service
+*in the app process* fetches the page, records its **title + SHA-256**, and
+shows the result on the phone. Kill the app mid-job — the job still finishes
+when you reopen it.
 
-**The captioned demo** (a real `digd` session, no audio — the captions narrate
-the durable queue, the title + SHA-256 record, the 12-speaker harvest, the 404
-retry path, and the EOF drain; every terminal line is the actual program
-output, in the actual order):
+## Watch it work (25 s, no audio)
+
+A real `digd` session — the captions narrate the durable queue, the title +
+SHA-256 record, the 12-speaker harvest, the 404 retry path, and the EOF drain.
+Every terminal line is the actual program output, in the actual order:
 
 ![session-digger captioned demo — a real terminal run, playing inline](docs/demo-video.webp)
 
@@ -18,10 +21,6 @@ output, in the actual order):
 - `docs/demo.gif` — the same kind of run as a plain terminal GIF
 
 ## What session-digger does
-
-droidcon Kenya publishes talks, speakers, and sponsors as web pages that change
-without notice. session-digger is a pocket backend that keeps proof of what a
-page actually contained when you saved it:
 
 * **Three ways in, one way out** — the in-app **Dig** button, the **Quick
   Settings tile** (a tap enqueues; the tile subtitle counts pending jobs), or
@@ -44,6 +43,111 @@ page actually contained when you saved it:
 
 One embedded Rust host, three supervised services: `digest-worker`,
 `enqueue-pump`, and (desktop) `link-ingest`.
+
+## View the session
+
+Everything session-digger records is local and queryable. The same session can
+be read four ways:
+
+### On the phone
+
+* **Digests tab** — every URL with its state badge (`Queued` / `Running` /
+  `Done` / `Failed` — the same enum the queue uses), the page title, and the
+  64-hex SHA-256. Both tabs **rehydrate from the SQLite mirror at startup**
+  (`DigestStore`), so closing the app never loses a session.
+* **Speakers tab** — tap **Load speaker list** to enqueue
+  `https://droidcon.co.ke/speakers`. The worker digests the page (title +
+  SHA-256 as usual) and, because the URL is the speakers directory, also
+  harvests each speaker card; the list renders as cards via a second JNI
+  callback (`JobEvents.onSpeakers`).
+* Both tabs **rehydrate from the SQLite mirror at startup** (`DigestStore`), so
+  closing the app never loses a session.
+* The **tile subtitle** shows the pending count; terminal states raise a
+  notification.
+
+### On the laptop
+
+```bash
+cd session-digger/rust
+cargo run --bin digd -- --root ./demo-root
+# paste URLs, one per line:
+#   https://droidcon.co.ke
+#   https://droidcon.co.ke/speakers  ← also harvests the speaker list
+#   !https://droidcon.co.ke/broken   ← re-queue a failed job
+# Ctrl-D (EOF) stops gracefully (exit 0)
+```
+
+Each finished job prints to stdout as it completes — the harvested speaker
+list prints too.
+
+### In the database
+
+The session lives in two SQLite files under the root you passed to `digd`:
+
+```bash
+sqlite3 demo-root/data/jobs.db \
+  'SELECT url, state, title, sha256, attempts, error FROM jobs;'
+sqlite3 demo-root/data/jobs.db 'SELECT name, role FROM speakers;'
+```
+
+(`jobs.db` is the digest index and archive; `demo-root/data/queue.db` is the
+durable `apalis-sqlite` queue itself.)
+
+### Live: the apalis-board queue inspector
+
+The desktop daemon can also serve the
+[apalis-board](https://github.com/apalis-dev/apalis-board) web UI over the
+**same durable `SqliteStorage` the pump pushes through**, not a copy:
+
+```bash
+cd rust
+cargo run --features board --bin digd -- --root ./demo-root --set board_addr=127.0.0.1:8080
+# open http://127.0.0.1:8080
+```
+
+Real jobs from this queue (Done tab shows the two successful droidcon digests;
+the Failed tab shows the 404 URL at attempt 3 — the retry cap in action):
+
+![apalis-board inspecting the digest queue — two Done tasks by dig-worker, attempt badges, healthy system status](docs/board-digest-done.png)
+
+The overview aggregates the backend stats (jobs/hour, success rate, backlog,
+worker health):
+
+![apalis-board overview — done jobs, failed jobs, success rate, system status healthy](docs/board-overview.png)
+
+The integration is deliberately opt-in: the cargo `board` feature pulls the
+dependency and `--set board_addr=...` starts the service, so the default
+build and the Android binary stay lean.
+
+## Run it
+
+### On a laptop (no phone needed)
+
+The `digd` session shown above in *View the session → On the laptop* is the
+whole quick start: `cargo run --bin digd -- --root ./demo-root`, paste URLs,
+Ctrl-D to stop. Everything it records is viewable the four ways described in
+*View the session*.
+
+### On Android
+
+One command does everything (installs missing Rust/cargo-ndk, finds the
+SDK/NDK, cross-compiles the core, builds the app, writes
+`session-digger/debug.apk` — this is the script the challenge CI runs):
+
+```bash
+bash session-digger/build.sh
+```
+
+Manual equivalent:
+
+1. Install Rust + `cargo install cargo-ndk`, plus an NDK (`ANDROID_NDK_HOME`).
+2. `cd session-digger/android && ./gradlew :app:assembleDebug`
+   — Gradle runs `scripts/build-android-rust.sh` via the `preBuild` hook and
+   packages `libsession_digger.so` (arm64-v8a). Without a Rust toolchain the
+   script degrades to a no-op so Kotlin-only builds still compile.
+3. Install on a device, allow notifications, then either:
+   - tap **Dig** in the app, or
+   - pull down Quick Settings, add the **Digger** tile, tap it.
 
 ## Architecture
 
@@ -73,93 +177,6 @@ stdin ───┘            │
                                     JobEvents.onSpeakers  <────────────┘
 ```
 
-## View the list of speakers
-
-1. Open **Speakers** and tap **Load speaker list** — the app enqueues
-   `https://droidcon.co.ke/speakers` like any other link.
-2. The worker digests the page (title + SHA-256 as usual) and, because the
-   URL is the speakers directory, also harvests each speaker card into the
-   ledger's `speakers` table.
-3. The list is pushed to the UI over a second JNI callback
-   (`JobEvents.onSpeakers`) and rendered as cards. It is persisted in the
-   ledger, so it reopens with the app — both tabs rehydrate from the same
-   SQLite mirror at startup (`DigestStore`).
-
-On the desktop the same run prints each harvested speaker to stdout, and the
-archived list is a plain SQL query away:
-
-```bash
-cargo run --bin digd -- --root ./demo-root
-# paste: https://droidcon.co.ke/speakers
-sqlite3 demo-root/data/jobs.db 'SELECT name, role FROM speakers;'
-```
-
-## Laptop quick start (no phone needed)
-
-```bash
-cd session-digger/rust
-cargo run --bin digd -- --root ./demo-root
-# paste URLs, one per line:
-#   https://droidcon.co.ke
-#   https://droidcon.co.ke/speakers  ← also harvests the speaker list
-#   !https://droidcon.co.ke/broken   ← re-queue a failed job
-# Ctrl-D (EOF) stops gracefully (exit 0)
-```
-
-Results land in `demo-root/data/jobs.db` (the digest index; the durable queue
-is `demo-root/data/queue.db`, both SQLite):
-
-```sql
-SELECT url, state, title, sha256, attempts, error FROM jobs;
-```
-
-### Watch the queue (apalis-board)
-
-The desktop daemon can also serve the [apalis-board](https://github.com/apalis-dev/apalis-board)
-queue inspector — a live web UI over the **same durable `SqliteStorage` the
-pump pushes through**, not a copy:
-
-```bash
-cd rust
-cargo run --features board --bin digd -- --root ./demo-root --set board_addr=127.0.0.1:8080
-# open http://127.0.0.1:8080
-```
-
-Real jobs from this queue (Done tab shows the two successful droidcon digests;
-the Failed tab shows the 404 URL at attempt 3 — the retry cap in action):
-
-![apalis-board inspecting the digest queue — two Done tasks by dig-worker, attempt badges, healthy system status](docs/board-digest-done.png)
-
-The overview aggregates the backend stats (jobs/hour, success rate, backlog,
-worker health):
-
-![apalis-board overview — done jobs, failed jobs, success rate, system status healthy](docs/board-overview.png)
-
-The integration is deliberately opt-in: the cargo `board` feature pulls the
-dependency and `--set board_addr=...` starts the service, so the default
-build and the Android binary stay lean.
-
-## Android quick start
-
-One command does everything (installs missing Rust/cargo-ndk, finds the
-SDK/NDK, cross-compiles the core, builds the app, writes
-`session-digger/debug.apk` — this is the script the challenge CI runs):
-
-```bash
-bash session-digger/build.sh
-```
-
-Manual equivalent:
-
-1. Install Rust + `cargo install cargo-ndk`, plus an NDK (`ANDROID_NDK_HOME`).
-2. `cd session-digger/android && ./gradlew :app:assembleDebug`
-   — Gradle runs `scripts/build-android-rust.sh` via the `preBuild` hook and
-   packages `libsession_digger.so` (arm64-v8a). Without a Rust toolchain the
-   script degrades to a no-op so Kotlin-only builds still compile.
-3. Install on a device, allow notifications, then either:
-   - tap **Dig** in the app, or
-   - pull down Quick Settings, add the **Digger** tile, tap it.
-
 ## What was verified
 
 * **Laptop, live:** `cargo test` — 12 unit tests; `cargo test --test laptop --
@@ -174,8 +191,8 @@ Manual equivalent:
   `DigTileService` for the QS tile. Five build-blocking defects in the
   committed tree were found and fixed while doing this (see the PR notes).
 * **Not yet verified on hardware:** a tap-through on a physical phone. The
-  debug APK is attached to the PR; device run results (logcat + photos) will
-  be posted as a PR comment.
+  [debug APK is attached to the PR](https://github.com/Roy-Wanyoike/rivium-challenge/releases/tag/session-digger-debug-v0.1.0);
+  device run results (logcat + photos) will be posted as a PR comment.
 
 ## Findings that may be useful to the maintainers
 
